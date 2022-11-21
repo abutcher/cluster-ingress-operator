@@ -3,9 +3,11 @@ package client
 import (
 	"context"
 
-	"github.com/Azure/azure-sdk-for-go/profiles/2018-03-01/dns/mgmt/dns"
-	privatedns "github.com/Azure/azure-sdk-for-go/services/privatedns/mgmt/2018-09-01/privatedns"
-	"github.com/Azure/go-autorest/autorest/azure"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	dns "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/dns/armdns"
+	privatedns "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 	"github.com/pkg/errors"
 )
 
@@ -15,7 +17,7 @@ type DNSClient interface {
 }
 
 type Config struct {
-	Environment    azure.Environment
+	Cloud          cloud.Configuration
 	SubscriptionID string
 	ClientID       string
 	ClientSecret   string
@@ -83,31 +85,40 @@ type recordSetClient struct {
 }
 
 func newRecordSetClient(config Config, userAgentExtension string) (*recordSetClient, error) {
-	authorizer, err := getAuthorizerForResource(config)
+	cred, err := getTokenCredentialForResource(config)
+	if err != nil {
+		return nil, err
+	}
+	options := arm.ClientOptions{
+		ClientOptions: policy.ClientOptions{
+			Cloud: config.Cloud,
+		},
+		DisableRPRegistration: false,
+	}
+	rc, err := dns.NewRecordSetsClient(config.SubscriptionID, cred, &options)
 	if err != nil {
 		return nil, err
 	}
 
-	rc := dns.NewRecordSetsClientWithBaseURI(config.Environment.ResourceManagerEndpoint, config.SubscriptionID)
-	rc.AddToUserAgent(userAgentExtension)
-	rc.Authorizer = authorizer
-	return &recordSetClient{client: rc}, nil
+	return &recordSetClient{client: *rc}, nil
 }
 
 func (c *recordSetClient) Put(ctx context.Context, zone Zone, arec ARecord) error {
 	rs := dns.RecordSet{
-		RecordSetProperties: &dns.RecordSetProperties{
+		Properties: &dns.RecordSetProperties{
 			TTL: &arec.TTL,
-			ARecords: &[]dns.ARecord{
-				{Ipv4Address: &arec.Address},
+			ARecords: []*dns.ARecord{
+				{
+					IPv4Address: &arec.Address,
+				},
 			},
 		},
 	}
 	if arec.Label != "" {
 		ownedValue := "owned"
-		rs.RecordSetProperties.Metadata = map[string]*string{arec.Label: &ownedValue}
+		rs.Properties.Metadata = map[string]*string{arec.Label: &ownedValue}
 	}
-	_, err := c.client.CreateOrUpdate(ctx, zone.ResourceGroup, zone.Name, arec.Name, dns.A, rs, "", "")
+	_, err := c.client.CreateOrUpdate(ctx, zone.ResourceGroup, zone.Name, arec.Name, dns.RecordTypeA, rs, nil)
 	if err != nil {
 		return errors.Wrapf(err, "failed to update dns a record: %s.%s", arec.Name, zone.Name)
 	}
@@ -115,12 +126,12 @@ func (c *recordSetClient) Put(ctx context.Context, zone Zone, arec ARecord) erro
 }
 
 func (c *recordSetClient) Delete(ctx context.Context, zone Zone, arec ARecord) error {
-	_, err := c.client.Get(ctx, zone.ResourceGroup, zone.Name, arec.Name, dns.A)
+	_, err := c.client.Get(ctx, zone.ResourceGroup, zone.Name, arec.Name, dns.RecordTypeA, nil)
 	if err != nil {
 		// TODO: How do we interpret this as a notfound error?
 		return nil
 	}
-	_, err = c.client.Delete(ctx, zone.ResourceGroup, zone.Name, arec.Name, dns.A, "")
+	_, err = c.client.Delete(ctx, zone.ResourceGroup, zone.Name, arec.Name, dns.RecordTypeA, nil)
 	if err != nil {
 		return errors.Wrapf(err, "failed to delete dns a record: %s.%s", arec.Name, zone.Name)
 	}
@@ -132,27 +143,36 @@ type privateRecordSetClient struct {
 }
 
 func newPrivateRecordSetClient(config Config, userAgentExtension string) (*privateRecordSetClient, error) {
-	authorizer, err := getAuthorizerForResource(config)
+	cred, err := getTokenCredentialForResource(config)
 	if err != nil {
 		return nil, err
 	}
 
-	prc := privatedns.NewRecordSetsClientWithBaseURI(config.Environment.ResourceManagerEndpoint, config.SubscriptionID)
-	prc.AddToUserAgent(userAgentExtension)
-	prc.Authorizer = authorizer
-	return &privateRecordSetClient{client: prc}, nil
+	options := arm.ClientOptions{
+		ClientOptions: policy.ClientOptions{
+			Cloud: config.Cloud,
+		},
+		DisableRPRegistration: false,
+	}
+	prc, err := privatedns.NewRecordSetsClient(config.SubscriptionID, cred, &options)
+	if err != nil {
+		return nil, err
+	}
+	return &privateRecordSetClient{client: *prc}, nil
 }
 
 func (c *privateRecordSetClient) Put(ctx context.Context, zone Zone, arec ARecord) error {
 	rs := privatedns.RecordSet{
-		RecordSetProperties: &privatedns.RecordSetProperties{
+		Properties: &privatedns.RecordSetProperties{
 			TTL: &arec.TTL,
-			ARecords: &[]privatedns.ARecord{
-				{Ipv4Address: &arec.Address},
+			ARecords: []*privatedns.ARecord{
+				{
+					IPv4Address: &arec.Address,
+				},
 			},
 		},
 	}
-	_, err := c.client.CreateOrUpdate(ctx, zone.ResourceGroup, zone.Name, privatedns.A, arec.Name, rs, "", "")
+	_, err := c.client.CreateOrUpdate(ctx, zone.ResourceGroup, zone.Name, privatedns.RecordTypeA, arec.Name, rs, nil)
 	if err != nil {
 		return errors.Wrapf(err, "failed to update dns a record: %s.%s", arec.Name, zone.Name)
 	}
@@ -160,12 +180,12 @@ func (c *privateRecordSetClient) Put(ctx context.Context, zone Zone, arec ARecor
 }
 
 func (c *privateRecordSetClient) Delete(ctx context.Context, zone Zone, arec ARecord) error {
-	_, err := c.client.Get(ctx, zone.ResourceGroup, zone.Name, privatedns.A, arec.Name)
+	_, err := c.client.Get(ctx, zone.ResourceGroup, zone.Name, privatedns.RecordTypeA, arec.Name, nil)
 	if err != nil {
 		// TODO: How do we interpret this as a notfound error?
 		return nil
 	}
-	_, err = c.client.Delete(ctx, zone.ResourceGroup, zone.Name, privatedns.A, arec.Name, "")
+	_, err = c.client.Delete(ctx, zone.ResourceGroup, zone.Name, privatedns.RecordTypeA, arec.Name, nil)
 	if err != nil {
 		return errors.Wrapf(err, "failed to delete dns a record: %s.%s", arec.Name, zone.Name)
 	}
