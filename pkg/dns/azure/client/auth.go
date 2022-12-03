@@ -46,7 +46,7 @@ func getAuthorizerForResource(config Config) (autorest.Authorizer, error) {
 	}
 
 	scope := config.Environment.TokenAudience
-	if !strings.HasPrefix(scope, "/.default") {
+	if !strings.HasSuffix(scope, "/.default") {
 		scope += "/.default"
 	}
 	// Use an adapter so azidentity in the Azure SDK can be used as
